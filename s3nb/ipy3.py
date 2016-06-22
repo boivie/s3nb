@@ -1,3 +1,5 @@
+import base64
+
 import codecs
 from collections import namedtuple
 import datetime
@@ -265,11 +267,14 @@ class S3ContentsManager(ContentsManager):
         return self.new(model, path)
 
     def _save_file(self, path, content, format):
-        if format != 'text':
-            raise web.HTTPError(400, u'Only text files are supported')
-
+        if format not in {'text', 'base64'}:
+            raise web.HTTPError(400, "Must specify format of file contents as 'text' or 'base64'")
         try:
-            bcontent = content.encode('utf8')
+            if format == 'text':
+                bcontent = content.encode('utf8')
+            else:
+                b64_bytes = content.encode('ascii')
+                bcontent = base64.decodestring(b64_bytes)
         except Exception as e:
             raise web.HTTPError(400, u'Encoding error saving {}: {}'.format(content, e))
 
@@ -277,7 +282,7 @@ class S3ContentsManager(ContentsManager):
         k.key = self._path_to_s3_key(path)
 
         with tempfile.NamedTemporaryFile() as f:
-            f.write(content)
+            f.write(bcontent)
             f.seek(0)
             k.set_contents_from_file(f)
 
