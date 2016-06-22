@@ -1,19 +1,16 @@
 import base64
-
-import codecs
-from collections import namedtuple
 import datetime
 import mimetypes
 import tempfile
+from collections import namedtuple
 
 import boto
-
+import codecs
+import nbformat
+from notebook.services.contents import tz
+from notebook.services.contents.filecheckpoints import GenericFileCheckpoints
+from notebook.services.contents.manager import ContentsManager
 from tornado import web
-
-from IPython import nbformat
-from IPython.html.services.contents.filecheckpoints import GenericFileCheckpoints
-from IPython.html.services.contents.manager import ContentsManager
-from IPython.utils import tz
 
 
 # s3 return different time formats in different situations apparently
@@ -148,7 +145,7 @@ class S3ContentsManager(ContentsManager):
                 self.log.debug('list_notebooks: found %s', k.name)
         return notebooks
 
-    def delete(self, path):
+    def delete_file(self, path):
         self.log.debug('delete: %s', locals())
         key = self._path_to_s3_key(path)
         self.log.debug('removing notebook in bucket: %s : %s', self.bucket.name, key)
@@ -303,7 +300,7 @@ class S3ContentsManager(ContentsManager):
         except Exception as e:
             raise web.HTTPError(400, u"Unexpected Error Writing Notebook: %s %s" % (path, e))
 
-    def rename(self, old_path, new_path):
+    def rename_file(self, old_path, new_path):
         self.log.debug('rename: %s', locals())
         if new_path == old_path:
             return
