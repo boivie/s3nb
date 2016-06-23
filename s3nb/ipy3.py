@@ -47,7 +47,7 @@ class S3ContentsManager(ContentsManager):
         self.log.debug("_s3_key_dir_to_model: %s: %s", key, key.name)
         model = {
             'name': self._get_key_dir_name(key.name),
-            'path': key.name.replace(self.s3_prefix, ''),
+            'path': key.name.replace(self.s3_prefix, '').strip(self.s3_key_delimiter),
             'last_modified': datetime.datetime.utcnow(), # key.last_modified,  will be used in an HTTP header
             'created': None, # key.last_modified,
             'type': 'directory',
@@ -147,9 +147,17 @@ class S3ContentsManager(ContentsManager):
 
     def delete_file(self, path):
         self.log.debug('delete: %s', locals())
-        key = self._path_to_s3_key(path)
-        self.log.debug('removing notebook in bucket: %s : %s', self.bucket.name, key)
-        self.bucket.delete_key(key)
+        keys = []
+        if self.dir_exists(path):
+            # we need to remove directory and everything under
+            for k in self.bucket.list(self._path_to_s3_key_dir(path)):
+                keys.append(self.s3_prefix + k.name)
+        else:
+            keys.append(self._path_to_s3_key(path))
+
+        for key in keys:
+            self.log.debug('removing key in bucket: %s : %s', self.bucket.name, key)
+            self.bucket.delete_key(key)
 
     def get(self, path, content=True, type=None, format=None):
         self.log.debug('get: %s', locals())
@@ -185,34 +193,34 @@ class S3ContentsManager(ContentsManager):
                 model['format'] = 'json'
                 self.validate_notebook_model(model)
             return model
-        else:  # assume that it is file
-            key = self._path_to_s3_key(path)
-            k = self.bucket.get_key(key)
+        else:  # assume that it is file or directory
+            if self.dir_exists(path):
+                key = self._path_to_s3_key_dir(path)
+                k = self.bucket.get_key(key)
+                model = self._s3_key_dir_to_model(k)
+            else:
+                key = self._path_to_s3_key(path)
+                k = self.bucket.get_key(key)
+                model = self._s3_key_file_to_model(k, timeformat=S3_TIMEFORMAT_GET_KEY)
 
-            model = self._s3_key_file_to_model(k, timeformat=S3_TIMEFORMAT_GET_KEY)
+                if content:
+                    try:
+                        model['content'] = k.get_contents_as_string()
+                    except Exception as e:
+                        raise web.HTTPError(400, u"Unreadable file: %s %s" % (path, e))
 
-            if content:
-                try:
-                    model['content'] = k.get_contents_as_string()
-                except Exception as e:
-                    raise web.HTTPError(400, u"Unreadable file: %s %s" % (path, e))
-
-                model['mimetype'] = 'text/plain'
-                model['format'] = 'text'
+                    model['mimetype'] = 'text/plain'
+                    model['format'] = 'text'
 
             return model
 
     def dir_exists(self, path):
         self.log.debug('dir_exists: %s', locals())
-        key = self._path_to_s3_key(path)
         if path == '':
             return True
-        else:
-            try:
-                next(iter(self.bucket.list(key, self.s3_key_delimiter)))
-                return True
-            except StopIteration:
-                return False
+        key = self._path_to_s3_key_dir(path)
+        k = self.bucket.get_key(key)
+        return k is not None and k.name.endswith(self.s3_key_delimiter)
 
     def is_hidden(self, path):
         self.log.debug('is_hidden %s', locals())
@@ -300,19 +308,44 @@ class S3ContentsManager(ContentsManager):
         except Exception as e:
             raise web.HTTPError(400, u"Unexpected Error Writing Notebook: %s %s" % (path, e))
 
+    def _save_directory(self, path, model):
+        """create a directory"""
+        self.log.debug('_save_directory: {}'.format(locals()))
+
+        k = self.bucket.new_key(self._path_to_s3_key_dir(path))
+        try:
+            k.set_contents_from_string('')
+        except Exception as e:
+            raise web.HTTPError(400, u"Unexpected Error Creating Directory: %s %s" % (path, e))
+
     def rename_file(self, old_path, new_path):
         self.log.debug('rename: %s', locals())
         if new_path == old_path:
             return
 
-        src_key = self._path_to_s3_key(old_path)
-        dst_key = self._path_to_s3_key(new_path)
-        self.log.debug('copying notebook in bucket: %s from %s to %s', self.bucket.name, src_key, dst_key)
-        if self.bucket.get_key(dst_key):
-            raise web.HTTPError(409, u'Notebook with name already exists: %s' % dst_key)
-        self.bucket.copy_key(dst_key, self.bucket.name, src_key)
-        self.log.debug('removing notebook in bucket: %s : %s', self.bucket.name, src_key)
-        self.bucket.delete_key(src_key)
+        new_key = self._path_to_s3_key(new_path)
+        if self.bucket.get_key(new_key):
+            raise web.HTTPError(409, u'File already exists: %s' % new_key)
+        new_key = self._path_to_s3_key_dir(new_path)
+        if self.bucket.get_key(new_key):
+            raise web.HTTPError(409, u'Directory already exists: %s' % new_key)
+
+        keys = []
+        if self.dir_exists(old_path):
+            # we need to rename directory and everything under
+            for k in self.bucket.list(self._path_to_s3_key_dir(old_path)):
+                old_key = self.s3_prefix + k.name
+                new_key = self.s3_prefix + k.name.replace(old_path, new_path, 1)
+                keys.append((old_key, new_key))
+        else:
+            self._rename_file(old_path, new_path)
+            keys.append((self._path_to_s3_key(old_path), self._path_to_s3_key(new_path)))
+
+        for (old_key, new_key) in keys:
+            self.log.debug('copying key in bucket: %s from %s to %s', self.bucket.name, old_key, new_key)
+            self.bucket.copy_key(new_key, self.bucket.name, old_key)
+            self.log.debug('removing key in bucket: %s : %s', self.bucket.name, old_key)
+            self.bucket.delete_key(old_key)
 
     def save(self, model, path):
         """ very similar to filemanager.save """
@@ -332,7 +365,7 @@ class S3ContentsManager(ContentsManager):
         elif model['type'] == 'file':
             self._save_file(path, model['content'], model.get('format'))
         elif model['type'] == 'directory':
-            pass  # keep symmetry with filemanager.save
+            self._save_directory(path, model)
         else:
             raise web.HTTPError(400, "Unhandled contents type: %s" % model['type'])
 
