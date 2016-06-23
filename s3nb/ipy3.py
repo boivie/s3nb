@@ -3,6 +3,7 @@ import base64
 import codecs
 from collections import namedtuple
 import datetime
+import mimetypes
 import tempfile
 
 import boto
@@ -63,15 +64,16 @@ class S3ContentsManager(ContentsManager):
 
     def _s3_key_file_to_model(self, key, timeformat):
         self.log.debug("_s3_key_file_to_model: %s: %s", key, key.name)
+        path = key.name.replace(self.s3_prefix, '')
         model = {
             'content': None,
             'name': key.name.rsplit(self.s3_key_delimiter, 1)[-1],
-            'path': key.name.replace(self.s3_prefix, ''),
+            'path': path,
             'last_modified': datetime.datetime.strptime(
                 key.last_modified, timeformat).replace(tzinfo=tz.UTC),
             'created': None,
             'type': 'file',
-            'mimetype': None,
+            'mimetype': mimetypes.guess_type(path)[0],
             'writable': True,
             'format': None,
         }
@@ -186,7 +188,7 @@ class S3ContentsManager(ContentsManager):
                 model['format'] = 'json'
                 self.validate_notebook_model(model)
             return model
-        else: # assume that it is file
+        else:  # assume that it is file
             key = self._path_to_s3_key(path)
             k = self.bucket.get_key(key)
 
